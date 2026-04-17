@@ -6,19 +6,17 @@
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { useGameStore, globalGameState } from '../store/gameStore';
-import { WORLD_SIZE, TURN_SPEED, BOOST_SPEED, BASE_SPEED } from '../shared/types';
+import { WORLD_SIZE, TURN_SPEED, BOOST_SPEED, BASE_SPEED, INITIAL_LENGTH, SEGMENT_SPACING, COLORS, ORB_SPAWN_RATE, MAX_ORBS } from '../shared/types';
 import * as THREE from 'three';
 import { Sphere, Grid } from '@react-three/drei';
-
-const localCollectedOrbs = new Set<string>();
+import { v4 as uuidv4 } from 'uuid';
 
 function Snake({ playerId, color, isLocal }: { playerId: string, color: string, isLocal: boolean }) {
   const bodyRef = useRef<THREE.InstancedMesh>(null);
   const headRef = useRef<THREE.Mesh>(null);
   const dummy = useMemo(() => new THREE.Object3D(), []);
-  const currentPositions = useRef<{x: number, y: number}[]>([]);
 
-  useFrame((state, delta) => {
+  useFrame(() => {
     if (!bodyRef.current || !headRef.current) return;
     const gs = globalGameState.current;
     if (!gs) return;
@@ -33,39 +31,15 @@ function Snake({ playerId, color, isLocal }: { playerId: string, color: string, 
     headRef.current.visible = true;
     const count = player.segments.length;
     bodyRef.current.count = Math.max(0, count - 1);
-    
-    while (currentPositions.current.length < count) {
-      const idx = currentPositions.current.length;
-      currentPositions.current.push({ 
-        x: player.segments[idx]?.x || 0, 
-        y: player.segments[idx]?.y || 0 
-      });
-    }
 
     for (let i = 0; i < count; i++) {
       let targetX = player.segments[i].x;
       let targetY = player.segments[i].y;
-      
-      const curr = currentPositions.current[i];
-      if (isLocal) {
-        curr.x = targetX;
-        curr.y = targetY;
-      } else {
-        const dist = Math.abs(targetX - curr.x) + Math.abs(targetY - curr.y);
-        if (dist > 10) {
-          curr.x = targetX;
-          curr.y = targetY;
-        } else {
-          const lerpFactor = 15;
-          curr.x += (targetX - curr.x) * lerpFactor * delta;
-          curr.y += (targetY - curr.y) * lerpFactor * delta;
-        }
-      }
-      
+            
       if (i === 0) {
-        headRef.current.position.set(curr.x, curr.y, 0.5);
+        headRef.current.position.set(targetX, targetY, 0.5);
       } else {
-        dummy.position.set(curr.x, curr.y, 0.5);
+        dummy.position.set(targetX, targetY, 0.5);
         dummy.updateMatrix();
         bodyRef.current.setMatrixAt(i - 1, dummy.matrix);
       }
@@ -128,7 +102,6 @@ function Orbs() {
 
     let i = 0;
     for (const orbId in gs.orbs) {
-      if (localCollectedOrbs.has(orbId)) continue;
       const orb = gs.orbs[orbId];
       dummy.position.set(orb.x, orb.y, 0.5);
       dummy.updateMatrix();
@@ -145,7 +118,7 @@ function Orbs() {
   });
 
   return (
-    <instancedMesh ref={meshRef} args={[null as any, null as any, 1000]} castShadow receiveShadow frustumCulled={false}>
+    <instancedMesh ref={meshRef} args={[null as any, null as any, MAX_ORBS + 1000]} castShadow receiveShadow frustumCulled={false}>
       <sphereGeometry args={[0.5, 16, 16]} />
       <meshStandardMaterial
         roughness={0.4}
@@ -166,27 +139,12 @@ function Orbs() {
 }
 
 export function GameScene() {
-  const { gameState, playerId, sendPlayerState, sendCollectOrb } = useGameStore();
+  const { gameState, playerId, difficulty, updateUiState } = useGameStore();
   const { camera } = useThree();
   const inputs = useRef({ left: false, right: false, boost: false });
   const lightRef = useRef<THREE.DirectionalLight>(null);
   const [lightTarget] = useState(() => new THREE.Object3D());
-
-  const localPlayerRef = useRef<{
-    active: boolean;
-    segments: {x: number, y: number}[];
-    score: number;
-    currentAngle: number;
-    isBoosting: boolean;
-    lastSendTime: number;
-  }>({
-    active: false,
-    segments: [],
-    score: 10,
-    currentAngle: 0,
-    isBoosting: false,
-    lastSendTime: 0,
-  });
+  const lastUiUpdateRef = useRef(0);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -218,138 +176,233 @@ export function GameScene() {
 
   useFrame((state, delta) => {
     const gs = globalGameState.current;
-    if (!gs || !playerId) return;
-    
-    const serverPlayer = gs.players[playerId];
-    if (serverPlayer && serverPlayer.state === 'alive') {
-      
-      // Initialize from server if not active
-      if (!localPlayerRef.current.active && serverPlayer.segments.length > 0) {
-        localPlayerRef.current.active = true;
-        localPlayerRef.current.segments = [...serverPlayer.segments];
-        localPlayerRef.current.score = serverPlayer.score;
-        localPlayerRef.current.currentAngle = serverPlayer.currentAngle;
-      }
+    if (!gs) return;
 
-      if (!localPlayerRef.current.active) return;
+    // Simulation loop
+    const boundary = WORLD_SIZE / 2;
+    const now = Date.now();
 
-      // Local movement logic
-      if (inputs.current.left) localPlayerRef.current.currentAngle += TURN_SPEED * delta;
-      if (inputs.current.right) localPlayerRef.current.currentAngle -= TURN_SPEED * delta;
-      
-      localPlayerRef.current.isBoosting = inputs.current.boost && localPlayerRef.current.score > 10;
-      const speed = localPlayerRef.current.isBoosting ? BOOST_SPEED : BASE_SPEED;
-      
-      const head = { ...localPlayerRef.current.segments[0] };
-      head.x += Math.cos(localPlayerRef.current.currentAngle) * speed * delta;
-      head.y += Math.sin(localPlayerRef.current.currentAngle) * speed * delta;
+    // Spawn orbs randomly
+    if (Object.keys(gs.orbs).length < MAX_ORBS && Math.random() < ORB_SPAWN_RATE * delta * 60) {
+       const oId = uuidv4();
+       gs.orbs[oId] = {
+           id: oId,
+           x: (Math.random() - 0.5) * WORLD_SIZE,
+           y: (Math.random() - 0.5) * WORLD_SIZE,
+           value: 1,
+           color: COLORS[Math.floor(Math.random() * COLORS.length)]
+       };
+    }
 
-      // Boundary check
-      const boundary = WORLD_SIZE / 2;
-      if (head.x < -boundary) head.x = -boundary;
-      if (head.x > boundary) head.x = boundary;
-      if (head.y < -boundary) head.y = -boundary;
-      if (head.y > boundary) head.y = boundary;
+    // Process players
+    for (const pId in gs.players) {
+       const p = gs.players[pId];
 
-      localPlayerRef.current.segments.unshift(head);
+       if (p.state === 'dead') {
+           if (p.isBot) {
+               if (!p.deadSince) p.deadSince = now;
+               // Respawn bots after 3 seconds
+               if (now - p.deadSince > 3000) {
+                   p.state = 'alive';
+                   p.score = INITIAL_LENGTH;
+                   p.color = COLORS[Math.floor(Math.random() * COLORS.length)];
+                   p.currentAngle = Math.random() * Math.PI * 2;
+                   const startX = (Math.random() - 0.5) * (WORLD_SIZE - 20);
+                   const startY = (Math.random() - 0.5) * (WORLD_SIZE - 20);
+                   p.segments = [];
+                   for (let i = 0; i < INITIAL_LENGTH; i++) {
+                     p.segments.push({
+                       x: startX - Math.cos(p.currentAngle) * i * SEGMENT_SPACING,
+                       y: startY - Math.sin(p.currentAngle) * i * SEGMENT_SPACING,
+                     });
+                   }
+                   p.deadSince = undefined;
+               }
+           }
+           continue;
+       }
 
-      if (localPlayerRef.current.isBoosting) {
-        localPlayerRef.current.score -= 2 * delta;
-        if (localPlayerRef.current.score <= 10) {
-          localPlayerRef.current.isBoosting = false;
-          localPlayerRef.current.score = 10;
-        }
-      }
+       const head = p.segments[0];
 
-      const targetLength = Math.floor(localPlayerRef.current.score);
-      while (localPlayerRef.current.segments.length > targetLength) {
-        localPlayerRef.current.segments.pop();
-      }
+       // Movement Logic
+       if (p.isBot) {
+           const distToWallX = boundary - Math.abs(head.x);
+           const distToWallY = boundary - Math.abs(head.y);
+           
+           let targetX = 0;
+           let targetY = 0;
+           let hasTarget = false;
+           let nearestDist = Infinity;
+           
+           // Evade wall
+           if (distToWallX < 15 || distToWallY < 15) {
+             targetX = 0;
+             targetY = 0;
+             hasTarget = true;
+           } else {
+             // Find nearest orb
+             for (const orbId in gs.orbs) {
+               const orb = gs.orbs[orbId];
+               const dx = head.x - orb.x;
+               const dy = head.y - orb.y;
+               const dist = dx*dx + dy*dy;
+               if (dist < nearestDist) {
+                   nearestDist = dist;
+                   targetX = orb.x;
+                   targetY = orb.y;
+                   hasTarget = true;
+               }
+             }
+           }
+           
+           if (hasTarget) {
+             const angleToTarget = Math.atan2(targetY - head.y, targetX - head.x);
+             let angleDiff = angleToTarget - p.currentAngle;
+             while(angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+             while(angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+             
+             const tSpeed = difficulty === 'easy' ? TURN_SPEED * 0.4 : (difficulty === 'normal' ? TURN_SPEED * 0.7 : TURN_SPEED);
+             if (angleDiff > 0.05) {
+                p.currentAngle += tSpeed * delta;
+             } else if (angleDiff < -0.05) {
+                p.currentAngle -= tSpeed * delta;
+             }
+             
+             if (difficulty === 'hard' && Math.abs(angleDiff) < 0.2 && nearestDist > 200 && p.score > 20) {
+               p.isBoosting = true;
+             } else {
+               p.isBoosting = false;
+             }
+           } else {
+               p.isBoosting = false;
+           }
+       } else {
+           // Local Player Inputs
+           if (inputs.current.left) p.currentAngle += TURN_SPEED * delta;
+           if (inputs.current.right) p.currentAngle -= TURN_SPEED * delta;
+           p.isBoosting = inputs.current.boost && p.score > 10;
+       }
 
-      // Check orb collisions
-      for (const orbId in gs.orbs) {
-        if (localCollectedOrbs.has(orbId)) continue;
-        const orb = gs.orbs[orbId];
-        const dx = head.x - orb.x;
-        const dy = head.y - orb.y;
-        if (dx * dx + dy * dy < 4) {
-          localPlayerRef.current.score += orb.value;
-          localCollectedOrbs.add(orbId);
-          delete gs.orbs[orbId]; // predict locally
-          sendCollectOrb(orbId);
-        }
-      }
+       const speed = p.isBoosting ? BOOST_SPEED : BASE_SPEED;
+       const newHead = {
+         x: head.x + Math.cos(p.currentAngle) * speed * delta,
+         y: head.y + Math.sin(p.currentAngle) * speed * delta,
+       };
 
-      // Cleanup localCollectedOrbs occasionally
-      if (Math.random() < 0.05) {
-        for (const id of localCollectedOrbs) {
-          if (!gs.orbs[id]) localCollectedOrbs.delete(id);
-        }
-      }
+       if (newHead.x < -boundary) newHead.x = -boundary;
+       if (newHead.x > boundary) newHead.x = boundary;
+       if (newHead.y < -boundary) newHead.y = -boundary;
+       if (newHead.y > boundary) newHead.y = boundary;
 
-      // Check player collisions
-      let collided = false;
-      for (const otherId in gs.players) {
-        if (otherId === playerId) continue;
-        const other = gs.players[otherId];
-        if (other.state !== 'alive') continue;
-        for (const seg of other.segments) {
-          const dx = head.x - seg.x;
-          const dy = head.y - seg.y;
-          if (dx * dx + dy * dy < 2.25) {
-            collided = true;
-            break;
+       p.segments.unshift(newHead);
+
+       if (p.isBoosting) {
+         p.score -= 2 * delta;
+         if (p.score <= 10) {
+           p.isBoosting = false;
+           p.score = 10;
+         }
+         // Drop orb randomly while boosting
+         if (Math.random() < 0.1 * (delta * 60)) {
+            const tail = p.segments[p.segments.length - 1];
+            const oId = uuidv4();
+            gs.orbs[oId] = {
+               id: oId, x: tail.x, y: tail.y, value: 1, color: p.color
+            };
+         }
+       }
+
+       const tl = Math.floor(p.score);
+       while (p.segments.length > tl) {
+         p.segments.pop();
+       }
+    }
+
+    // Collisions
+    for (const pId in gs.players) {
+       const p = gs.players[pId];
+       if (p.state !== 'alive') continue;
+       const head = p.segments[0];
+
+       // Orbs
+       for (const orbId in gs.orbs) {
+          const orb = gs.orbs[orbId];
+          const dx = head.x - orb.x;
+          const dy = head.y - orb.y;
+          if (dx*dx + dy*dy < 4) {
+             p.score += orb.value;
+             delete gs.orbs[orbId];
           }
-        }
-        if (collided) break;
-      }
+       }
 
-      if (collided) {
-        localPlayerRef.current.active = false;
-        sendPlayerState({
-          segments: localPlayerRef.current.segments,
-          score: localPlayerRef.current.score,
-          currentAngle: localPlayerRef.current.currentAngle,
-          isBoosting: localPlayerRef.current.isBoosting,
-          state: 'dead'
-        });
-        return;
-      }
+       // Snakes
+       let collided = false;
+       for (const oId in gs.players) {
+          const other = gs.players[oId];
+          if (other.state !== 'alive') continue;
+          
+          if (oId === pId) {
+             // Self collision check starts far enough back
+             for (let i = 15; i < p.segments.length; i++) {
+                const dx = head.x - p.segments[i].x;
+                const dy = head.y - p.segments[i].y;
+                if (dx*dx + dy*dy < 2.25) {
+                   collided = true; break;
+                }
+             }
+          } else {
+             for (const seg of other.segments) {
+                const dx = head.x - seg.x;
+                const dy = head.y - seg.y;
+                if (dx*dx + dy*dy < 2.25) {
+                   collided = true; break;
+                }
+             }
+          }
+          if (collided) break;
+       }
 
-      // Overwrite global state for local rendering
-      gs.players[playerId].segments = localPlayerRef.current.segments;
-      gs.players[playerId].score = localPlayerRef.current.score;
-      gs.players[playerId].currentAngle = localPlayerRef.current.currentAngle;
-      gs.players[playerId].isBoosting = localPlayerRef.current.isBoosting;
+       if (collided) {
+          p.state = 'dead';
+          // turn half of segments into orbs
+          p.segments.forEach((seg, i) => {
+             if (i % 2 === 0) {
+                 const oId = uuidv4();
+                 gs.orbs[oId] = { id: oId, x: seg.x, y: seg.y, value: 1, color: p.color };
+             }
+          });
+          p.segments = [];
+       }
+    }
 
-      // Send state to server at 20Hz
-      const now = Date.now();
-      if (now - localPlayerRef.current.lastSendTime > 50) {
-        sendPlayerState({
-          segments: localPlayerRef.current.segments,
-          score: localPlayerRef.current.score,
-          currentAngle: localPlayerRef.current.currentAngle,
-          isBoosting: localPlayerRef.current.isBoosting,
-          state: 'alive'
-        });
-        localPlayerRef.current.lastSendTime = now;
-      }
+    // Camera follow for local player
+    if (playerId) {
+       const localPlayer = gs.players[playerId];
+       if (localPlayer && localPlayer.state === 'alive' && localPlayer.segments.length > 0) {
+           const head = localPlayer.segments[0];
+           const targetZ = Math.min(45, Math.max(20, 20 + localPlayer.score * 0.2));
+           camera.position.x += (head.x - camera.position.x) * 10 * delta;
+           camera.position.y += (head.y - camera.position.y) * 10 * delta;
+           camera.position.z += (targetZ - camera.position.z) * 4 * delta;
+           camera.lookAt(camera.position.x, camera.position.y, 0);
 
-      const targetZ = Math.min(45, Math.max(20, 20 + localPlayerRef.current.score * 0.2));
-      
-      // Smooth camera follow predicted head
-      camera.position.x += (head.x - camera.position.x) * 10 * delta;
-      camera.position.y += (head.y - camera.position.y) * 10 * delta;
-      camera.position.z += (targetZ - camera.position.z) * 4 * delta;
-      camera.lookAt(camera.position.x, camera.position.y, 0);
+           if (lightRef.current) {
+             lightRef.current.position.set(camera.position.x + 10, camera.position.y - 10, 30);
+             lightTarget.position.set(camera.position.x, camera.position.y, 0);
+           }
+       }
+    }
 
-      // Make the directional light follow the camera to keep shadows crisp
-      if (lightRef.current) {
-        lightRef.current.position.set(camera.position.x + 10, camera.position.y - 10, 30);
-        lightTarget.position.set(camera.position.x, camera.position.y, 0);
-      }
-    } else {
-      localPlayerRef.current.active = false;
+    // Periodically update React UI State (10Hz)
+    if (now - lastUiUpdateRef.current > 100) {
+       gs.leaderboard = Object.values(gs.players)
+         .filter(p => p.state === 'alive')
+         .sort((a,b) => b.score - a.score)
+         .slice(0, 10)
+         .map(p => ({ id: p.id, name: p.name, score: Math.floor(p.score), color: p.color }));
+       
+       updateUiState();
+       lastUiUpdateRef.current = now;
     }
   });
 
@@ -375,7 +428,6 @@ export function GameScene() {
       />
       <primitive object={lightTarget} />
 
-      {/* Ground plane to receive shadows */}
       <mesh receiveShadow position={[0, 0, -0.2]}>
         <planeGeometry args={[WORLD_SIZE, WORLD_SIZE]} />
         <meshStandardMaterial color="#0a0a0a" />

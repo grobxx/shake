@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" fill="#050505"/>
+  <!-- Snake Body -->
+  <path d="M 120 400 L 120 120 L 400 120 L 400 260 L 260 260 L 260 380" fill="none" stroke="#50fa7b" stroke-width="60" stroke-linecap="round" stroke-linejoin="round" />
+  <!-- Snake Eye -->
+  <circle cx="260" cy="380" r="15" fill="#050505" />
+  <!-- Targeted Orb -->
+  <circle cx="380" cy="380" r="25" fill="#ff7eb3" />
+</svg>

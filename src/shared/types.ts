@@ -20,7 +20,8 @@ export type Player = {
   isBoosting: boolean;
   state: PlayerState;
   currentAngle: number;
-  inputs: { left: boolean; right: boolean; boost: boolean };
+  isBot: boolean;
+  deadSince?: number; // timestamp for bot respawn
 };
 
 export type Orb = {
@@ -38,11 +39,20 @@ export type LeaderboardEntry = {
   color: string;
 };
 
+export const COLORS = [
+  '#ff7eb3', // vibrant pink
+  '#ffb86c', // vibrant orange
+  '#f1fa8c', // vibrant yellow
+  '#50fa7b', // vibrant green
+  '#8be9fd', // vibrant blue
+  '#bd93f9', // vibrant purple
+];
+
 export const WORLD_SIZE = 150;
 export const BASE_SPEED = 15;
 export const BOOST_SPEED = 30;
 export const TICK_RATE = 60; // 60 updates per second
-export const ORB_SPAWN_RATE = 0.1; // Orbs per tick
+export const ORB_SPAWN_RATE = 0.5; // Orbs per tick
 export const MAX_ORBS = 300;
 export const INITIAL_LENGTH = 10;
 export const SEGMENT_SPACING = 0.5;

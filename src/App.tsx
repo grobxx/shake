@@ -9,13 +9,24 @@ import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import { GameScene } from './components/GameScene';
 import { useGameStore } from './store/gameStore';
 import { UI } from './components/UI';
+import { initYandex } from './shared/yandex';
 
 export default function App() {
-  const { connect } = useGameStore();
+  const { initializeLocalGame, setLanguage } = useGameStore();
 
   useEffect(() => {
-    connect();
-  }, [connect]);
+    initializeLocalGame();
+    initYandex().then(ysdk => {
+      if (ysdk) {
+        const lang = ysdk.environment.i18n.lang;
+        if (['ru', 'be', 'kk', 'uk', 'uz'].includes(lang)) {
+          setLanguage('ru');
+        } else {
+          setLanguage('en');
+        }
+      }
+    });
+  }, [initializeLocalGame, setLanguage]);
 
   return (
     <div className="w-screen h-screen bg-black overflow-hidden relative">
